@@ -1,0 +1,10 @@
+{
+  "admin/network/mobilescan": {
+    "title": "Mobile Network",
+    "order": 90,
+    "action": {
+      "type": "view",
+      "path": "mobilescan/index"
+    }
+  }
+}
