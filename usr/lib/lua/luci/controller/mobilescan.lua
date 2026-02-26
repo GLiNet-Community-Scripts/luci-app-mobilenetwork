@@ -16,7 +16,7 @@ end
 local function rpc_call(obj, max_time)
   local body = jsonc.stringify(obj)
   local connect_timeout = 3
-  local max_t = tonumber(max_time) or 25
+  local max_t = tonumber(max_time) or 300
 
   local cmd = "curl -s --connect-timeout " .. connect_timeout .. " --max-time " .. max_t .. " " ..
               "-H 'glinet: 1' " ..
@@ -55,7 +55,7 @@ function action_scan()
     params  = { "", "modem", "send_at_command", { bus= DEFAULT_BUS, port= DEFAULT_PORT, command= "AT+COPS=?" } },
     id = 1
   }
-  local parsed, err = rpc_call(payload, 45)
+  local parsed, err = rpc_call(payload, 300)
   if err then http.write_json(err); return end
   http.write_json({ ok=true, data=parsed })
 end
@@ -71,7 +71,7 @@ function action_scan()
     id      = 1
   }
 
-  local parsed_disc, err_disc = rpc_call(disconnect_payload, 20)
+  local parsed_disc, err_disc = rpc_call(disconnect_payload, 300)
   if err_disc then
     http.write_json(err_disc)
     return
@@ -96,7 +96,7 @@ function action_scan()
     id = 1
   }
 
-  local parsed_scan, err_scan = rpc_call(scan_payload, 45)
+  local parsed_scan, err_scan = rpc_call(scan_payload, 300)
   if err_scan then
     http.write_json(err_scan)
     return
@@ -113,7 +113,7 @@ function action_set_auto_connect()
     params  = { "", "modem", "set_connect", { bus= DEFAULT_BUS } },
     id = 1
   }
-  local parsed, err = rpc_call(payload, 15)
+  local parsed, err = rpc_call(payload, 300)
   if err then http.write_json(err); return end
   http.write_json({ ok=true, data=parsed })
 end
@@ -132,7 +132,7 @@ function action_at()
       { bus= DEFAULT_BUS, port=DEFAULT_PORT, command=cmd } },
     id = 1
   }
-  local parsed, err = rpc_call(payload, 25)
+  local parsed, err = rpc_call(payload, 300)
   if err then http.write_json(err); return end
   http.write_json({ ok=true, data=parsed })
 end
