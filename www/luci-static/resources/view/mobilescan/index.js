@@ -112,12 +112,11 @@ function prettyError(e) {
 function createStatusModal() {
   const overlay = el('div', { id: 'ms-modal-overlay', class: 'ms-modal-hidden' }, []);
   const modal = el('div', { id: 'ms-modal' }, [
-    el('div', { id: 'ms-modal-title' }, ['Working...']),
-    el('div', { id: 'ms-modal-msg' }, ['Please wait...']),
-    el('div', { id: 'ms-modal-spin-row' }, [
-      el('span', { id: 'ms-modal-spin-icon', class: 'ms-modal-spinner' }, ['']),
-      el('span', { id: 'ms-modal-spin-text' }, ['Working...'])
+    el('div', { id: 'ms-modal-title' }, [
+      el('span', { id: 'ms-modal-title-icon', class: 'ms-modal-spinner' }, ['']),
+      el('span', { id: 'ms-modal-title-text' }, ['Working...'])
     ]),
+    el('div', { id: 'ms-modal-msg' }, ['Please wait...']),
     el('div', { id: 'ms-modal-progress' }, [
       el('div', { id: 'ms-modal-bar' }, [])
     ]),
@@ -135,17 +134,15 @@ function modalSetVisible(modal, show) {
 
 function modalSetMessage(modal, msg, title) {
   if (!modal) return;
-  const titleEl = modal.querySelector('#ms-modal-title');
+  const titleEl = modal.querySelector('#ms-modal-title-text');
   const msgEl = modal.querySelector('#ms-modal-msg');
-  const spinText = modal.querySelector('#ms-modal-spin-text');
   if (titleEl && title) titleEl.textContent = String(title);
   if (msgEl) msgEl.textContent = String(msg || '');
-  if (spinText) spinText.textContent = String(title || 'Working...');
 }
 
 function modalSetState(modal, state) {
   if (!modal) return;
-  const icon = modal.querySelector('#ms-modal-spin-icon');
+  const icon = modal.querySelector('#ms-modal-title-icon');
   if (!icon) return;
   icon.classList.remove('ms-modal-spinner', 'ms-modal-icon-ok', 'ms-modal-icon-err');
   if (state === 'ok') {
@@ -238,12 +235,11 @@ return view.extend({
         box-shadow:0 20px 50px rgba(0,0,0,0.2);
         border:1px solid rgba(0,0,0,0.08);
       }
-      #ms-modal-title{ font-weight:700; font-size:16px; margin-bottom:6px; }
-      #ms-modal-msg{ font-size:13px; line-height:1.4; white-space:pre-wrap; }
-      #ms-modal-spin-row{
-        margin-top:10px; display:flex; align-items:center; gap:8px;
-        font-size:12px; color:rgba(0,0,0,0.7);
+      #ms-modal-title{
+        font-weight:700; font-size:16px; margin-bottom:6px;
+        display:flex; align-items:center; gap:8px;
       }
+      #ms-modal-msg{ font-size:13px; line-height:1.4; white-space:pre-wrap; }
       #ms-modal-progress{
         margin-top:14px; height:8px; border-radius:6px;
         background:rgba(0,0,0,0.12); overflow:hidden;
@@ -574,7 +570,7 @@ return view.extend({
 
         for (let i = 0; i < cmds.length; i++) {
           const cmd = cmds[i];
-          modal.update(`Auto select network:\nSending ${cmd}\nWaiting for OK...`, 'Auto Select');
+          modal.update(`Sending ${cmd}\nWaiting for OK...`, 'Auto Select');
 
           const url = luciUrl('admin/network/mobilescan/at') + '?cmd=' + encodeURIComponent(cmd);
           const res = await request.get(url, { cache: false, timeout: 300000 });
@@ -592,6 +588,22 @@ return view.extend({
           setTimeout(() => modal.stop(true), 6500);
           return;
           }
+        }
+
+        // 2) Auto-connect (after OKs)
+        modal.update('Auto select complete. Enabling auto-connect...', 'Auto-connect', 'working');
+        const res2 = await request.get(luciUrl('admin/network/mobilescan/set_auto_connect'), { cache: false, timeout: 300000 });
+        const json2 = res2.json();
+        if (!json2 || json2.ok !== true) {
+          modal.update(`Auto-connect failed: ${json2?.error || 'unknown error'}`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
+          return;
+        }
+        const resp2 = extractModemResponse(json2);
+        if (resp2 && !responseHasOK(resp2)) {
+          modal.update('Auto-connect reply not OK.', 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
+          return;
         }
 
         modal.update('Auto select network complete (all commands returned OK).', 'Done', 'ok');
