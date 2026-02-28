@@ -78,6 +78,21 @@ function responseHasOK(resp) {
   return /\r?\nOK\r?\n/i.test(resp) || /(^|\s)OK(\s|$)/i.test(resp);
 }
 
+function parseCopsCurrentOperator(resp) {
+  if (!resp || typeof resp !== 'string') return null;
+  const m = resp.match(/\+COPS:\s*\d+(?:,\d+)?(?:,\"([^\"]*)\")?/i);
+  if (m && m[1]) return m[1].trim() || null;
+  return null;
+}
+
+function parseCopsSignal(resp) {
+  if (!resp || typeof resp !== 'string') return null;
+  const m = resp.match(/\+CSQ:\s*(\d+)\s*,/i);
+  if (!m) return null;
+  const v = parseInt(m[1], 10);
+  if (!Number.isFinite(v)) return null;
+  return v;
+}
 /** Fix “weird ?” / object errors */
 function prettyError(e) {
   if (!e) return 'Unknown error';
@@ -92,39 +107,96 @@ function prettyError(e) {
   return String(e);
 }
 
-/* -------------------- Toasts (sticky until updated) -------------------- */
+/* -------------------- Modal Status + Progress -------------------- */
 
-function createToastHost() {
-  return el('div', { id: 'ms-toast-host' }, []);
-}
-
-function toastCreate(host, msg, type) {
-  const t = el('div', { class: `ms-toast ms-${type || 'info'}` }, [
-    el('div', { class: 'ms-toast-msg' }, [String(msg)])
+function createStatusModal() {
+  const overlay = el('div', { id: 'ms-modal-overlay', class: 'ms-modal-hidden' }, []);
+  const modal = el('div', { id: 'ms-modal' }, [
+    el('div', { id: 'ms-modal-title' }, [
+      el('span', { id: 'ms-modal-title-icon', class: 'ms-modal-spinner' }, ['']),
+      el('span', { id: 'ms-modal-title-text' }, ['Working...'])
+    ]),
+    el('div', { id: 'ms-modal-msg' }, ['Please wait...']),
+    el('div', { id: 'ms-modal-progress' }, [
+      el('div', { id: 'ms-modal-bar' }, [])
+    ]),
+    el('div', { id: 'ms-modal-eta' }, ['Time left: --s'])
   ]);
-  host.appendChild(t);
-  requestAnimationFrame(() => t.classList.add('show'));
-  return t;
+
+  overlay.appendChild(modal);
+  return overlay;
 }
 
-function toastSet(t, msg, type) {
-  if (!t) return;
-  t.className = `ms-toast ms-${type || 'info'} show`;
-  const msgEl = t.querySelector('.ms-toast-msg');
-  if (msgEl) msgEl.textContent = String(msg);
+function modalSetVisible(modal, show) {
+  if (!modal) return;
+  modal.classList.toggle('ms-modal-hidden', !show);
 }
 
-function toastClose(t) {
-  if (!t) return;
-  t.classList.remove('show');
-  setTimeout(() => {
-    if (t.parentNode) t.parentNode.removeChild(t);
-  }, 250);
+function modalSetMessage(modal, msg, title) {
+  if (!modal) return;
+  const titleEl = modal.querySelector('#ms-modal-title-text');
+  const msgEl = modal.querySelector('#ms-modal-msg');
+  if (titleEl && title) titleEl.textContent = String(title);
+  if (msgEl) msgEl.textContent = String(msg || '');
 }
 
-function toastUpdateAndClose(t, msg, type, delayMs) {
-  toastSet(t, msg, type);
-  setTimeout(() => toastClose(t), typeof delayMs === 'number' ? delayMs : 2500);
+function modalSetState(modal, state) {
+  if (!modal) return;
+  const icon = modal.querySelector('#ms-modal-title-icon');
+  if (!icon) return;
+  icon.classList.remove('ms-modal-spinner', 'ms-modal-icon-ok', 'ms-modal-icon-err');
+  if (state === 'ok') {
+    icon.textContent = 'OK';
+    icon.classList.add('ms-modal-icon-ok');
+  } else if (state === 'error') {
+    icon.textContent = 'ERR';
+    icon.classList.add('ms-modal-icon-err');
+  } else {
+    icon.textContent = '';
+    icon.classList.add('ms-modal-spinner');
+  }
+}
+function modalSetProgress(modal, ratio, secondsLeft) {
+  if (!modal) return;
+  const bar = modal.querySelector('#ms-modal-bar');
+  const eta = modal.querySelector('#ms-modal-eta');
+  if (bar) bar.style.width = `${Math.max(0, Math.min(1, ratio)) * 100}%`;
+  if (eta) eta.textContent = `Time left: ${Math.max(0, Math.ceil(secondsLeft))}s`;
+}
+
+function createModalController(modal) {
+  let timer = null;
+  let endAt = 0;
+
+  function start(msg, timeoutMs, title) {
+    stop();
+    endAt = Date.now() + timeoutMs;
+    modalSetMessage(modal, msg, title || 'Working...');
+    modalSetState(modal, 'working');
+    modalSetVisible(modal, true);
+    const tick = () => {
+      const now = Date.now();
+      const remaining = Math.max(0, endAt - now);
+      const ratio = timeoutMs > 0 ? (remaining / timeoutMs) : 0;
+      modalSetProgress(modal, 1 - ratio, remaining / 1000);
+      if (remaining <= 0) stop(false);
+    };
+    tick();
+    timer = setInterval(tick, 250);
+  }
+
+  function update(msg, title, state) {
+    modalSetMessage(modal, msg, title);
+    if (state) modalSetState(modal, state);
+  }
+
+  function stop(hide = true) {
+    if (timer) clearInterval(timer);
+    timer = null;
+    if (hide) modalSetVisible(modal, false);
+  }
+
+  return { start, update, stop };
 }
 
 /* Operator name helper */
@@ -141,33 +213,43 @@ return view.extend({
 
   render: function () {
     const root = el('div', { id: 'mobilescan-app' }, []);
-    const toastHost = createToastHost();
+    const modalOverlay = createStatusModal();
+    const modal = createModalController(modalOverlay);
 
     const style = el('style', {}, [`
       /* Hide Save/Apply/Reset bars */
       .cbi-page-actions, .cbi-section-actions, .cbi-map > .cbi-page-actions { display:none !important; }
 
-      /* Toast host */
-      #ms-toast-host{
-        position:fixed; right:18px; top:18px; z-index:9999;
-        display:flex; flex-direction:column; gap:10px; max-width:420px;
-        pointer-events:none;
+      /* Modal overlay */
+      #ms-modal-overlay{
+        position:fixed; inset:0; z-index:9999;
+        display:flex; align-items:center; justify-content:center;
+        background:rgba(0,0,0,0.25);
+        backdrop-filter:blur(1px);
       }
-      .ms-toast{
-        pointer-events:none;
-        border-radius:10px; padding:10px 12px;
-        box-shadow:0 10px 24px rgba(0,0,0,0.18);
-        transform:translateY(-6px); opacity:0;
-        transition:opacity 200ms ease, transform 200ms ease;
-        font-size:13px; line-height:1.35;
-        background:#fff; color:#222;
-        border-left:4px solid rgba(0,0,0,0.25);
+      #ms-modal-overlay.ms-modal-hidden{ display:none; }
+      #ms-modal{
+        width:min(520px, 92vw);
+        background:#fff; color:#111;
+        border-radius:14px; padding:18px 20px;
+        box-shadow:0 20px 50px rgba(0,0,0,0.2);
+        border:1px solid rgba(0,0,0,0.08);
       }
-      .ms-toast.show{ opacity:1; transform:translateY(0); }
-      .ms-toast.ms-info{ border-left-color:#3b82f6; }
-      .ms-toast.ms-success{ border-left-color:#16a34a; }
-      .ms-toast.ms-error{ border-left-color:#dc2626; }
-      .ms-toast-msg{ white-space:pre-wrap; }
+      #ms-modal-title{
+        font-weight:700; font-size:16px; margin-bottom:6px;
+        display:flex; align-items:center; gap:8px;
+      }
+      #ms-modal-msg{ font-size:13px; line-height:1.4; white-space:pre-wrap; }
+      #ms-modal-progress{
+        margin-top:14px; height:8px; border-radius:6px;
+        background:rgba(0,0,0,0.12); overflow:hidden;
+      }
+      #ms-modal-bar{
+        height:100%; width:0%;
+        background:linear-gradient(90deg, #16a34a, #22c55e);
+        transition:width 200ms linear;
+      }
+      #ms-modal-eta{ margin-top:8px; font-size:12px; color:rgba(0,0,0,0.6); }
 
       /* Table */
       #mobilescan-app table.ms-table{ width:100%; table-layout:fixed; border-collapse:collapse; }
@@ -189,14 +271,57 @@ return view.extend({
       #mobilescan-app .ms-bar[data-b="2"]{ height:7px; }
       #mobilescan-app .ms-bar[data-b="3"]{ height:10px; }
       #mobilescan-app .ms-bar[data-b="4"]{ height:13px; }
-      #mobilescan-app .ms-bar.on{ background:rgba(0,0,0,0.65); }
+      #mobilescan-app .ms-bar.on{ background:#3b82f6; }
 
       #mobilescan-app .ms-empty{ color:rgba(0,0,0,0.55); font-style:italic; }
+
+      /* Info pills styled like buttons for better dark-mode visibility */
+      #mobilescan-app .ms-info-pill{
+        cursor:default; pointer-events:none;
+        font-size:12px; line-height:1.2;
+        padding:6px 10px; margin-left:6px;
+      }
+      #mobilescan-app .ms-info-pill-sig{ display:inline-flex; align-items:center; gap:6px; }
+      #mobilescan-app .ms-op-spinner{
+        width:12px; height:12px; margin-left:6px;
+        border-radius:50%;
+        border:2px solid rgba(0,0,0,0.25);
+        border-top-color:#3b82f6;
+        display:inline-block;
+        animation: ms-spin 0.8s linear infinite;
+      }
+      #mobilescan-app .ms-op-spinner-hidden{ visibility:hidden; }
+      #mobilescan-app .ms-modal-spinner{
+        width:14px; height:14px;
+        border-radius:50%;
+        border:2px solid rgba(0,0,0,0.25);
+        border-top-color:#3b82f6;
+        display:inline-block;
+        animation: ms-spin 0.8s linear infinite;
+      }
+      #mobilescan-app .ms-modal-icon-ok,
+      #mobilescan-app .ms-modal-icon-err{
+        width:28px; height:18px;
+        border-radius:9px;
+        display:inline-flex; align-items:center; justify-content:center;
+        font-size:11px; font-weight:700;
+        color:#fff; background:#16a34a;
+      }
+      #mobilescan-app .ms-modal-icon-err{ background:#dc2626; }
+      @keyframes ms-spin { to { transform: rotate(360deg); } }
     `]);
 
     const scanBtn = el('button', { class: 'cbi-button cbi-button-action' }, ['Scan Network']);
     const connectBtn = el('button', { class: 'cbi-button cbi-button-positive', disabled: 'disabled', style: 'margin-left:10px;' }, ['Connect']);
     const revertBtn = el('button', { class: 'cbi-button cbi-button-neutral', style: 'margin-left:10px;' }, ['Auto Select Network']);
+    const currentOpInfo = el('span', { class: 'cbi-button cbi-button-neutral ms-info-pill' }, [
+      el('span', { id: 'ms-op-text' }, ['Current operator: --']),
+      el('span', { id: 'ms-op-spin', class: 'ms-op-spinner ms-op-spinner-hidden' }, [''])
+    ]);
+    const currentSigWrap = el('span', { class: 'cbi-button cbi-button-neutral ms-info-pill ms-info-pill-sig' }, [
+      el('span', {}, ['Signal:']),
+      makeSignalIcon(0)
+    ]);
     const spinner = el('span', { style: 'margin-left:10px; display:none;' }, ['?']);
 
     const tableWrap = el('div', { style: 'margin-top:15px;' }, []);
@@ -304,12 +429,12 @@ return view.extend({
 
     async function doScan() {
       if (isScanning || isBusyAction) {
-        const t = toastCreate(toastHost, 'Please wait... operation in progress.', 'info');
-        toastUpdateAndClose(t, 'Please wait... operation in progress.', 'info', 2200);
+        modal.start('Please wait... operation in progress.', 300000, 'Busy');
+        setTimeout(() => modal.stop(true), 2200);
         return;
       }
 
-      const t = toastCreate(toastHost, 'Scanning mobile networks... waiting for modem response', 'info');
+      modal.start('Scanning mobile networks... waiting for modem response', 300000, 'Scanning');
 
       try {
         setBusyScan(true);
@@ -322,11 +447,12 @@ return view.extend({
         setConnectEnabledByRule();
         renderTable();
 
-        const res = await request.get(luciUrl('admin/network/mobilescan/scan'), { cache: false });
+        const res = await request.get(luciUrl('admin/network/mobilescan/scan'), { cache: false, timeout: 300000 });
         const json = res.json();
 
         if (!json || json.ok !== true) {
-          toastUpdateAndClose(t, `Scan failed: ${json?.error || 'unknown error'}`, 'error', 4500);
+          modal.update(`Scan failed: ${json?.error || 'unknown error'}`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 4500);
           return;
         }
 
@@ -336,13 +462,16 @@ return view.extend({
         renderTable();
 
         if (!tuples.length) {
-          toastUpdateAndClose(t, 'Scan finished but no networks were found (or parse failed).', 'error', 4500);
+          modal.update('Scan finished but no networks were found (or parse failed).', 'Error', 'error');
+          setTimeout(() => modal.stop(true), 4500);
           return;
         }
 
-        toastUpdateAndClose(t, `Scan complete: found ${tuples.length} network(s).`, 'success', 2800);
+        modal.update(`Scan complete: found ${tuples.length} network(s).`, 'Done', 'ok');
+        setTimeout(() => modal.stop(true), 2800);
       } catch (e) {
-        toastUpdateAndClose(t, `Scan error: ${prettyError(e)}`, 'error', 4500);
+        modal.update(`Scan error: ${prettyError(e)}`, 'Error', 'error');
+        setTimeout(() => modal.stop(true), 4500);
       } finally {
         setBusyScan(false);
         setConnectEnabledByRule();
@@ -351,68 +480,74 @@ return view.extend({
 
     async function doConnect() {
       if (isBusyAction || isScanning) {
-        const t = toastCreate(toastHost, 'Please wait... another operation is running.', 'info');
-        toastUpdateAndClose(t, 'Please wait... another operation is running.', 'info', 2200);
+        modal.start('Please wait... another operation is running.', 300000, 'Busy');
+        setTimeout(() => modal.stop(true), 2200);
         return;
       }
 
       if (connectBtn.hasAttribute('disabled')) {
-        const t = toastCreate(toastHost, 'Connect is disabled (selection rule).', 'info');
-        toastUpdateAndClose(t, 'Connect is disabled (selection rule).', 'info', 2500);
+        modal.start('Connect is disabled (selection rule).', 300000, 'Info');
+        setTimeout(() => modal.stop(true), 2500);
         return;
       }
 
       const plmn = String(selectedFourth ?? '').trim();
       if (!plmn) {
-        const t = toastCreate(toastHost, 'No operator selected.', 'error');
-        toastUpdateAndClose(t, 'No operator selected.', 'error', 3200);
+        modal.start('No operator selected.', 300000, 'Error');
+        setTimeout(() => modal.stop(true), 3200);
         return;
       }
 
       const selectedTuple = tuples[selectedIndex];
       const opName = operatorNameFromTuple(selectedTuple);
 
-      const t = toastCreate(toastHost, `Connecting to ${opName}... waiting for OK`, 'info');
+      modal.start(`Connecting to ${opName}... waiting for OK`, 300000, 'Connecting');
 
       try {
         setBusyActionState(true);
 
         // 1) Connect
         const url = luciUrl('admin/network/mobilescan/connect') + '?plmn=' + encodeURIComponent(plmn);
-        const res = await request.get(url, { cache: false });
+        const res = await request.get(url, { cache: false, timeout: 300000 });
         const json = res.json();
 
         if (!json || json.ok !== true) {
-          toastUpdateAndClose(t, `Connect failed (${opName}): ${json?.error || 'unknown error'}`, 'error', 5200);
+          modal.update(`Connect failed (${opName}): ${json?.error || 'unknown error'}`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
           return;
         }
 
         const resp1 = extractModemResponse(json);
         if (!responseHasOK(resp1)) {
-          toastUpdateAndClose(t, `Connect did not return OK (${opName}). Auto-connect NOT enabled.`, 'error', 5200);
+          modal.update(`Connect did not return OK (${opName}). Auto-connect NOT enabled.`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
           return;
         }
 
         // 2) Auto-connect (only after OK)
-        toastSet(t, `Connected to ${opName}. Enabling auto-connect... waiting for reply`, 'info');
+        modal.update(`Connected to ${opName}. Enabling auto-connect... waiting for reply`, 'Auto-connect', 'working');
 
-        const res2 = await request.get(luciUrl('admin/network/mobilescan/set_auto_connect'), { cache: false });
+        const res2 = await request.get(luciUrl('admin/network/mobilescan/set_auto_connect'), { cache: false, timeout: 300000 });
         const json2 = res2.json();
 
         if (!json2 || json2.ok !== true) {
-          toastUpdateAndClose(t, `Auto-connect failed (${opName}): ${json2?.error || 'unknown error'}`, 'error', 5200);
+          modal.update(`Auto-connect failed (${opName}): ${json2?.error || 'unknown error'}`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
           return;
         }
 
         const resp2 = extractModemResponse(json2);
         if (resp2 && !responseHasOK(resp2)) {
-          toastUpdateAndClose(t, `Auto-connect reply not OK (${opName}).`, 'error', 5200);
+          modal.update(`Auto-connect reply not OK (${opName}).`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
           return;
         }
 
-        toastUpdateAndClose(t, `Connected to ${opName} and auto-connect enabled.`, 'success', 3200);
+        modal.update(`Connected to ${opName} and auto-connect enabled.`, 'Done', 'ok');
+        setTimeout(() => modal.stop(true), 3200);
       } catch (e) {
-        toastUpdateAndClose(t, `Connect error (${opName}): ${prettyError(e)}`, 'error', 5200);
+        modal.update(`Connect error (${opName}): ${prettyError(e)}`, 'Error', 'error');
+        setTimeout(() => modal.stop(true), 5200);
       } finally {
         setBusyActionState(false);
         setConnectEnabledByRule();
@@ -421,12 +556,12 @@ return view.extend({
 
     async function doAutoSelectNetwork() {
       if (isBusyAction || isScanning) {
-        const t = toastCreate(toastHost, 'Please wait... another operation is running.', 'info');
-        toastUpdateAndClose(t, 'Please wait... another operation is running.', 'info', 2200);
+        modal.start('Please wait... another operation is running.', 300000, 'Busy');
+        setTimeout(() => modal.stop(true), 2200);
         return;
       }
 
-      const t = toastCreate(toastHost, 'Auto select network: starting…', 'info');
+      modal.start('Auto select network: starting...', 300000, 'Auto Select');
 
       try {
         setBusyActionState(true);
@@ -435,30 +570,98 @@ return view.extend({
 
         for (let i = 0; i < cmds.length; i++) {
           const cmd = cmds[i];
-          toastSet(t, `Auto select network:\nSending ${cmd}\nWaiting for OK…`, 'info');
+          modal.update(`Sending ${cmd}\nWaiting for OK...`, 'Auto Select');
 
           const url = luciUrl('admin/network/mobilescan/at') + '?cmd=' + encodeURIComponent(cmd);
-          const res = await request.get(url, { cache: false });
+          const res = await request.get(url, { cache: false, timeout: 300000 });
           const json = res.json();
 
           if (!json || json.ok !== true) {
-            toastUpdateAndClose(t, `Failed: ${cmd}\n${json?.error || 'unknown error'}`, 'error', 6000);
-            return;
+          modal.update(`Failed: ${cmd}\n${json?.error || 'unknown error'}`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 6000);
+          return;
           }
 
           const resp = extractModemResponse(json);
           if (!responseHasOK(resp)) {
-            toastUpdateAndClose(t, `No OK reply for: ${cmd}\nStopping to avoid errors.`, 'error', 6500);
-            return;
+          modal.update(`No OK reply for: ${cmd}\nStopping to avoid errors.`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 6500);
+          return;
           }
         }
 
-        toastUpdateAndClose(t, 'Auto select network complete (all commands returned OK).', 'success', 3400);
+        // 2) Auto-connect (after OKs)
+        modal.update('Auto select complete. Enabling auto-connect...', 'Auto-connect', 'working');
+        const res2 = await request.get(luciUrl('admin/network/mobilescan/set_auto_connect'), { cache: false, timeout: 300000 });
+        const json2 = res2.json();
+        if (!json2 || json2.ok !== true) {
+          modal.update(`Auto-connect failed: ${json2?.error || 'unknown error'}`, 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
+          return;
+        }
+        const resp2 = extractModemResponse(json2);
+        if (resp2 && !responseHasOK(resp2)) {
+          modal.update('Auto-connect reply not OK.', 'Error', 'error');
+          setTimeout(() => modal.stop(true), 5200);
+          return;
+        }
+
+        modal.update('Auto select network complete (all commands returned OK).', 'Done', 'ok');
+        await refreshCurrentOperator();
+        setTimeout(() => modal.stop(true), 3400);
       } catch (e) {
-        toastUpdateAndClose(t, `Auto select error: ${prettyError(e)}`, 'error', 5200);
+        modal.update(`Auto select error: ${prettyError(e)}`, 'Error', 'error');
+        setTimeout(() => modal.stop(true), 5200);
       } finally {
         setBusyActionState(false);
         setConnectEnabledByRule();
+      }
+    }
+
+    let lastOpName = 'Current operator: --';
+    let lastSigIcon = makeSignalIcon(0);
+
+    function setInfoLoading(isLoading) {
+      const spin = currentOpInfo.querySelector('#ms-op-spin');
+      if (spin) spin.classList.toggle('ms-op-spinner-hidden', !isLoading);
+    }
+
+    async function refreshCurrentOperator() {
+      if (isScanning || isBusyAction) return;
+      setInfoLoading(true);
+      try {
+        const url = luciUrl('admin/network/mobilescan/at') + '?cmd=' + encodeURIComponent('AT+COPS?');
+        const res = await request.get(url, { cache: false, timeout: 300000 });
+        const json = res.json();
+        if (!json || json.ok !== true) {
+          currentOpInfo.textContent = 'Current operator: error';
+          return;
+        }
+        const resp = extractModemResponse(json);
+        const name = parseCopsCurrentOperator(resp);
+        lastOpName = 'Current operator: ' + (name || 'unknown');
+        const opText = currentOpInfo.querySelector('#ms-op-text');
+        if (opText) opText.textContent = lastOpName;
+
+        const urlSig = luciUrl('admin/network/mobilescan/at') + '?cmd=' + encodeURIComponent('AT+CSQ');
+        const resSig = await request.get(urlSig, { cache: false, timeout: 300000 });
+        const jsonSig = resSig.json();
+        if (!jsonSig || jsonSig.ok !== true) {
+          return;
+        }
+        const respSig = extractModemResponse(jsonSig);
+        const sig = parseCopsSignal(respSig);
+        if (sig !== null) {
+          lastSigIcon = makeSignalIcon(sig);
+          currentSigWrap.replaceChildren(
+            el('span', {}, ['Signal:']),
+            lastSigIcon
+          );
+        }
+      } catch (e) {
+        currentOpInfo.textContent = 'Current operator: error';
+      } finally {
+        setInfoLoading(false);
       }
     }
 
@@ -467,9 +670,19 @@ return view.extend({
     revertBtn.addEventListener('click', doAutoSelectNetwork);
 
     root.appendChild(style);
-    root.appendChild(toastHost);
-    root.appendChild(el('div', { style: 'margin-top:10px;' }, [scanBtn, connectBtn, revertBtn, spinner]));
+    root.appendChild(modalOverlay);
+    root.appendChild(el('div', { style: 'margin-top:10px; display:flex; align-items:center; flex-wrap:wrap; gap:8px;' }, [
+      scanBtn,
+      connectBtn,
+      revertBtn,
+      spinner,
+      currentOpInfo,
+      currentSigWrap
+    ]));
     root.appendChild(tableWrap);
+
+    refreshCurrentOperator();
+    setInterval(refreshCurrentOperator, 30000);
 
     return root;
   }
